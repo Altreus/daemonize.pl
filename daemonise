@@ -1,0 +1,114 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use Cwd;
+use Data::Dumper; # yes really
+use File::Basename;
+use Daemon::Control;
+use IO::Prompt::Tiny qw/prompt/;
+use Capture::Tiny 'capture';
+use Opt::Imistic (@ARGV > 1 ? 1 : ());
+
+use 5.010;
+
+my %daemon;
+
+{
+    my $program = shift;
+    PATH: {
+        $daemon{program} = prompt("Daemonise this program:", $program // ());
+        unless ($ARGV{e}) {
+            -e $daemon{program} or redo PATH;
+        }
+    }
+};
+
+$daemon{program_args} = [ split ' ', prompt("With these options:", @ARGV ? join ' ', @ARGV : ()) ];
+
+{
+    my ($default_name) = $daemon{program} =~ m{([^/]+)$};
+    $default_name =~ s/[-_]/ /g;
+    $default_name = ucfirst($default_name);
+    $daemon{name} = prompt("Program name:", $default_name);
+}
+
+my $lsb;
+LSB: {
+    $lsb = lc(prompt("Generate LSB init script?", 'Y'));
+    say "Please enter Y or N" and redo LSB if $lsb ne 'y' and $lsb ne 'n';
+}
+
+if ($lsb eq 'y') {
+    $daemon{lsb_start} = prompt("LSB Required-Start:", '$syslog $remote_fs');
+    $daemon{lsb_stop} = prompt("LSB Required-Stop:", '$syslog');
+    $daemon{lsb_sdesc} = prompt("LSB Short description:", $daemon{name});
+    $daemon{lsb_desc} = prompt("LSB Full description:", $daemon{name});
+
+}
+
+{
+    no warnings 'numeric';
+    FORK: {
+        $daemon{fork} = prompt("Fork level [1,2,?]:", 2) + 0;
+        if ($daemon{fork} eq '?') {
+            say "Use 1 if $daemon{program} knows how to daemonise itself, i.e. will fork itself,";
+            say "associate with init, etc. Use 2 if not, or unsure.";
+            redo FORK;
+        }
+        $daemon{fork} == 1 or $daemon{fork} == 2 or say "Invalid option" and redo FORK;
+    }
+}
+
+$daemon{path} = prompt("Path to new script:", getcwd . "/" . basename $daemon{program});
+$daemon{pid_file} = prompt("PID file:", '/var/run/' . basename($daemon{path} // $daemon{program}) . '.pid');
+$daemon{stderr_file} = prompt("STDERR file:", '/var/log/' . basename($daemon{path} // $daemon{program}) . '/err.log');
+$daemon{stdout_file} = prompt("STDOUT file:", '/var/log/' . basename($daemon{path} // $daemon{program}) . '/out.log');
+
+my $out_text;
+{
+    local $/ = undef;
+    $out_text = <DATA>;
+}
+
+$Data::Dumper::Terse = 1;
+$out_text =~ s/ARGS/Dumper \%daemon/e;
+
+if (-t STDOUT) {
+    open my $daemon_script_h, ">", $daemon{path} or die "Failed to open $daemon{path}: $!";
+
+    print $daemon_script_h $out_text;
+
+    close $daemon_script_h;
+
+    chmod "0744", $daemon{path};
+}
+else {
+    print $out_text;
+}
+
+if ($lsb eq 'y') {
+    my ($init_script) = capture {
+        # D::C hacks at the hashref, so copy it
+        Daemon::Control->new( { %daemon } )->dump_init_script;
+    };
+
+    my $print_to = prompt("init script:", $> ? $ENV{HOME} . '/init.d/' . basename($daemon{program}) : '/etc/init.d/' . basename($daemon{program}));
+
+    open my $init_script_h, ">", $print_to or die "Couldn't open init script $print_to for writing: $!";
+
+    print $init_script_h $init_script;
+
+    close $init_script_h;
+
+    chmod "0744", $print_to;
+}
+
+__DATA__
+#!/usr/bin/perl
+use warnings;
+use strict;
+use Daemon::Control;
+
+Daemon::Control->new( ARGS )->run;
